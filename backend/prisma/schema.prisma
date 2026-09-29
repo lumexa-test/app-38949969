@@ -1,0 +1,124 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── Multi-tenancy pattern ────────────────────────────────────────────────────
+// tenantId is a string key that scopes every row to a specific project/tenant.
+// For the MVP generator: each generated project gets its own tenantId value.
+// Always filter queries by tenantId when serving multi-tenant data.
+// ─────────────────────────────────────────────────────────────────────────────
+
+model User {
+  id        Int      @id @default(autoincrement())
+  email     String   @unique
+  password  String
+  tenantId  String   @default("default") @map("tenant_id")
+  // Every generated app ships with admin support out of the box. The
+  // first admin row is created by `prisma/seed.ts` (idempotent upsert);
+  // additional admins are promoted by toggling this flag.
+  isAdmin   Boolean  @default(false) @map("is_admin")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  // ── Domain fields (FaceGlow AI) ──────────────────────────────────────
+  displayName   String @default("") @map("display_name")
+  creditBalance Int    @default(0) @map("credit_balance")
+
+  enhancementJobs    EnhancementJob[]
+  creditTransactions CreditTransaction[]
+
+  @@index([tenantId])
+  @@map("users")
+}
+
+// ── DOMAIN MODELS GO HERE ─────────────────────────────────────────────
+// Add the app's domain models below. Every user-visible lifecycle event
+// gets a timestamp field; humans are displayed by name, never email/id.
+
+// A single photo-enhancement request. The uploaded photo's own fields are
+// folded onto this model (no separate Photo table) since a photo only ever
+// exists in the context of the request it was uploaded for.
+//
+// NOTE ON AI PROCESSING: this build's plan only wires OpenAI / Anthropic /
+// Stripe / Perplexity as integration seams. The actual photo-retouch and
+// portrait-generation step described in the PRD runs on Fal AI, which is NOT
+// on this plan — per the platform rule for unsupported providers, that
+// capability is omitted entirely (no seam, no UI). This entity and its CRUD
+// (upload → choose corrections → confirm → submit → view/list) is built in
+// full; jobs are created and honestly rest at `queued` since nothing in this
+// build (or the platform's later add-on pass, which only wires the 4 allowed
+// providers) ever advances them further. Seeded demo rows use the full range
+// of statuses so the UI has something real to show.
+model EnhancementJob {
+  id       Int    @id @default(autoincrement())
+  tenantId String @default("default") @map("tenant_id")
+  userId   Int    @map("user_id")
+  user     User   @relation(fields: [userId], references: [id])
+
+  reference String @unique // short human code, e.g. ENH-A1B2C3
+
+  photoUrl       String @map("photo_url")
+  photoFileName  String @map("photo_file_name")
+  photoMimeType  String @map("photo_mime_type")
+  photoSizeBytes Int    @map("photo_size_bytes")
+
+  // Array of CORRECTION_OPTION keys the user selected, e.g. ["darkSpotRemoval","skinSmoothing"]
+  selectedOptions Json @default("[]") @map("selected_options")
+  // { smoothing?: 'light'|'medium'|'strong', toneEvening?: ..., brightness?: ... }
+  optionStrengths Json @default("{}") @map("option_strengths")
+
+  // Automatic photo review (OpenAI seam) — plain-language concerns detected.
+  reviewNotes  Json?  @map("review_notes") // string[] when present
+  reviewStatus String @default("pending") @map("review_status") // pending | complete | unavailable
+
+  // draft (being composed, pre-submit) | queued | processing | ready | failed
+  status          String  @default("draft")
+  resultImagePath String? @map("result_image_path")
+  failureMessage  String? @map("failure_message")
+
+  creditsCharged Int       @default(0) @map("credits_charged")
+  refundedAt     DateTime? @map("refunded_at")
+
+  submittedAt         DateTime? @map("submitted_at")
+  processingStartedAt DateTime? @map("processing_started_at")
+  completedAt         DateTime? @map("completed_at")
+  failedAt            DateTime? @map("failed_at")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  creditTransactions CreditTransaction[]
+
+  @@index([tenantId])
+  @@index([userId])
+  @@index([status])
+  @@map("enhancement_jobs")
+}
+
+// Ledger of every credit grant, purchase, spend and refund.
+model CreditTransaction {
+  id       Int    @id @default(autoincrement())
+  tenantId String @default("default") @map("tenant_id")
+  userId   Int    @map("user_id")
+  user     User   @relation(fields: [userId], references: [id])
+
+  // signup_grant | purchase | enhancement_spend | refund
+  type         String
+  amount       Int // signed: negative for spends, positive for grants/purchases/refunds
+  balanceAfter Int    @map("balance_after")
+  description  String
+
+  relatedJobId Int?            @map("related_job_id")
+  relatedJob   EnhancementJob? @relation(fields: [relatedJobId], references: [id])
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([tenantId])
+  @@index([userId])
+  @@map("credit_transactions")
+}
