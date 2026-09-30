@@ -1,9 +1,8 @@
 # Lumexa background verification — platform-managed, do not edit.
 #
-# Dispatched by the Lumexa platform after this app's first deploy, and again
-# after the owner's integration keys are installed and deployed. Runs the
-# Claude Code CLI to test the live app against its PRD in a real browser; only
-# if something is broken it fixes the code, hands the fix to the platform
+# Dispatched ONCE by the Lumexa platform after this app's first deploy. Runs
+# the Claude Code CLI to test the live app against its PRD in a real browser;
+# only if something is broken it fixes the code, hands the fix to the platform
 # (which redeploys) and retests. Logic lives in .github/lumexa-verify/run.sh.
 #
 # Needs (org level): secret CLAUDE_CODE_OAUTH_TOKEN (from `claude setup-token`).
@@ -25,7 +24,7 @@ concurrency:
 jobs:
   verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 210
+    timeout-minutes: 150
     env:
       RUN_ID: ${{ github.event.client_payload.run_id }}
       RUN_TOKEN: ${{ github.event.client_payload.token }}

@@ -4,7 +4,7 @@
 // the platform refuses fixes that touch either (src/services/e2eVerify/fix.ts
 // keeps the same list), so undoing them here keeps a fix shippable.
 import { execFileSync } from 'child_process';
-import { existsSync, readFileSync, rmSync } from 'fs';
+import { rmSync } from 'fs';
 
 const PROTECTED = [
   /^\.github\//,
@@ -26,13 +26,6 @@ const PROTECTED = [
   /^\.playwright-mcp\//,
 ];
 const BUILT_OUTPUT = /^backend\/public\//;
-// Integration kit files (exact paths, one per line) — pre-written provider code
-// the platform installed; applyFix refuses a fix that touches them.
-const KIT_FILES = new Set(
-  process.env.PROTECTED_EXTRA && existsSync(process.env.PROTECTED_EXTRA)
-    ? readFileSync(process.env.PROTECTED_EXTRA, 'utf8').split('\n').map((l) => l.trim()).filter(Boolean)
-    : [],
-);
 
 const git = (...args) => execFileSync('git', args, { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
 
@@ -52,7 +45,7 @@ for (const { code, path } of entries) {
     restored.push(`${path} (deleted)`);
     continue;
   }
-  if (KIT_FILES.has(path) || PROTECTED.some((re) => re.test(path))) {
+  if (PROTECTED.some((re) => re.test(path))) {
     if (untracked) rmSync(path, { force: true, recursive: true });
     else git('checkout', 'HEAD', '--', path);
     restored.push(`${path} (protected)`);
