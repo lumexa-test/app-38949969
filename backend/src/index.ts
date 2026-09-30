@@ -13,6 +13,7 @@ import { prisma } from './lib/prisma';
 import paymentsRouter, { stripeWebhookRouter } from './custom/integrations/stripe';
 import aiRouter, { transcribeRouter } from './custom/integrations/openai';
 import { analyzeImageRouter } from './custom/integrations/openai';
+import perplexityRouter from './custom/integrations/perplexity';
 
 const app = express();
 
@@ -59,6 +60,7 @@ app.use('/api/credits', creditsRoutes);
 app.use('/api/uploads', uploadRoutes); // image uploads → platform proxy (see "Image uploads" in backend/CLAUDE.md; never touch S3/AWS directly)
 app.use('/api/payments', paymentsRouter);
 app.use('/api/ai', aiRouter);
+app.use('/api/perplexity', perplexityRouter);
 
 // Serve frontend static files (production: vite build output copied to public/)
 const publicDir = join(__dirname, '..', '..', 'public');
