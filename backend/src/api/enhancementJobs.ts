@@ -4,6 +4,7 @@ import { handlePrismaError } from '../lib/handleError';
 import { handleSeamError, IntegrationNotConfiguredError } from '../lib/integrationSeam';
 import EnhancementJob from '../models/enhancementJob';
 import { isValidOptionKey, STRENGTH_VALUES } from '../lib/correctionOptions';
+import { isOpenAIConfigured, analyzeImage, OpenAIError } from '../custom/integrations/openai';
 
 const ENHANCEMENT_COST = 1;
 const ALLOWED_MIME_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
@@ -68,9 +69,24 @@ async function create(req: Request, res: Response): Promise<any> {
   }
 }
 
-// @integration-seam openai photo-review
-async function reviewPhotoForConcerns(_photoUrl: string): Promise<string[]> {
-  throw new IntegrationNotConfiguredError('OpenAI');
+async function reviewPhotoForConcerns(photoUrl: string): Promise<string[]> {
+  if (!isOpenAIConfigured()) {
+    throw new IntegrationNotConfiguredError('OpenAI');
+  }
+  const { content } = await analyzeImage({
+    imageUrl: photoUrl,
+    prompt:
+      'You are a photo-enhancement advisor. Review this portrait photo and list specific visual concerns or areas that could be improved (e.g. blemishes, uneven skin tone, red-eye, lighting issues, shadows). Return ONLY a JSON array of short strings, one concern per item. If there are no concerns, return an empty array []. Example: ["Blemishes on forehead", "Uneven skin tone", "Dark circles under eyes"]',
+    maxTokens: 256,
+    detail: 'low',
+  });
+  try {
+    const parsed = JSON.parse(content.trim());
+    if (Array.isArray(parsed)) return parsed.map(String);
+  } catch {
+    // fall through to single-item fallback
+  }
+  return content.trim() ? [content.trim()] : [];
 }
 
 // POST /api/enhancement-jobs/:id/review — automatic photo review.
@@ -93,6 +109,11 @@ async function review(req: Request, res: Response): Promise<any> {
     if (error instanceof IntegrationNotConfiguredError) {
       await EnhancementJob.updateReview(id, { reviewStatus: 'unavailable' });
       handleSeamError(error, res);
+      return;
+    }
+    if (error instanceof OpenAIError) {
+      await EnhancementJob.updateReview(id, { reviewStatus: 'unavailable' });
+      handleSeamError(new IntegrationNotConfiguredError('OpenAI'), res);
       return;
     }
     return handlePrismaError(error, res);
