@@ -2,6 +2,9 @@
 //   node summarize.mjs <results.json> <invalid-tests.txt> <out-summary.json> <out-failures.md>
 // Tests listed in invalid-tests.txt (one id per line — marked by the fixer as
 // wrong about the PRD, not the app) are left out of every count.
+// A `<results>-confirm.json` next to the report (the failing tests run a second
+// time, see run_tests) is merged in: a test that passed there is flaky, not
+// failed — only failures that repeat reach the fixer.
 import { readFileSync, writeFileSync, existsSync } from 'fs';
 
 const [resultsPath, invalidPath, outJson, outMd] = process.argv.slice(2);
@@ -18,6 +21,7 @@ const invalid = new Set(
     : [],
 );
 
+function collect(rep) {
 const cases = [];
 function walk(suite, titles) {
   const here = suite.title && !suite.title.endsWith('.ts') ? [...titles, suite.title] : titles;
@@ -34,7 +38,32 @@ function walk(suite, titles) {
   }
   for (const child of suite.suites ?? []) walk(child, here);
 }
-for (const s of report?.suites ?? []) walk(s, []);
+for (const s of rep?.suites ?? []) walk(s, []);
+return cases;
+}
+const cases = collect(report);
+
+const confirmPath = resultsPath.replace(/\.json$/, '-confirm.json');
+if (report && existsSync(confirmPath)) {
+  let confirm = null;
+  try {
+    confirm = JSON.parse(readFileSync(confirmPath, 'utf8'));
+  } catch {
+    confirm = null;
+  }
+  const second = new Map(collect(confirm).map((c) => [c.id, c]));
+  for (const c of cases) {
+    const again = second.get(c.id);
+    if (c.status !== 'unexpected' || !again) continue;
+    if (again.status === 'unexpected') {
+      // The second run's screenshots/traces replaced the first run's on disk.
+      c.error = again.error;
+      c.attachments = again.attachments;
+    } else {
+      c.status = 'flaky';
+    }
+  }
+}
 
 const counted = cases.filter((c) => !invalid.has(c.id));
 const failures = counted.filter((c) => c.status === 'unexpected');
@@ -47,6 +76,7 @@ const summary = {
   excludedAsInvalid: cases.length - counted.length,
   passedIds: counted.filter((c) => c.status !== 'unexpected').map((c) => c.id),
   failedIds: failures.map((c) => c.id),
+  invalidIds: cases.filter((c) => invalid.has(c.id)).map((c) => c.id),
   failures: failures.map((c) => ({ id: c.id, error: c.error.slice(0, 1500) })),
 };
 writeFileSync(outJson, JSON.stringify(summary, null, 2));

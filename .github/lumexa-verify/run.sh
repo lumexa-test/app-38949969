@@ -4,10 +4,20 @@
 #   1. Fetch the run context (live URL, admin login, PRD) from the platform.
 #   2. Claude Code writes Playwright tests from the PRD and runs them.
 #   3. All green → report "passed" and stop.
-#   4. Otherwise, up to MAX_ROUNDS times: Claude fixes the app → the build is
-#      verified here → the fix is pushed to a side branch → the platform
-#      fast-forwards main and redeploys → the tests run again. A fix that
-#      breaks a previously passing test is rolled back and the run stops.
+#   4. Otherwise, up to MAX_ROUNDS times: Claude fixes the app → a second
+#      session reviews the fix and reverts what no failing test needs → the
+#      build is verified here → the fix is pushed to a side branch → the
+#      platform fast-forwards main and redeploys → the tests run again. A fix
+#      that breaks a passing test, or repairs none, is rolled back and the run
+#      stops.
+#
+# Two kinds of run (the platform says which in the context):
+#   initial      — after the first deploy: writes the suite, then saves it on
+#                  the platform.
+#   integration  — after the owner's integration keys were installed and
+#                  deployed: repeats the SAVED suite, and for every installed
+#                  integration adds code-placement checks (generated from the
+#                  kit manifest) and browser tests of where it shows up.
 #
 # Every exit path reports an outcome to the platform. Nothing here touches a
 # database directly; the app's data is only used through its own UI, and tests
@@ -22,21 +32,23 @@ mkdir -p "$WORK"
 
 TEST_MODEL="${TEST_MODEL:-sonnet}"
 FIX_MODEL="${FIX_MODEL:-opus}"
-# Budgets — the workflow's timeout-minutes (150) is the hard ceiling; a run
+# Budgets — the workflow's timeout-minutes (210) is the hard ceiling; a run
 # that overruns it is reported as a crash and any unconfirmed fix withdrawn.
 CLAUDE_TESTS_TIMEOUT="${CLAUDE_TESTS_TIMEOUT:-40m}"
 CLAUDE_FIX_TIMEOUT="${CLAUDE_FIX_TIMEOUT:-30m}"
+CLAUDE_REVIEW_TIMEOUT="${CLAUDE_REVIEW_TIMEOUT:-15m}"
+REVIEW_MODEL="${REVIEW_MODEL:-$FIX_MODEL}"
 TESTS_TIMEOUT="${TESTS_TIMEOUT:-30m}"
 DEPLOY_WAIT_SECS="${DEPLOY_WAIT_SECS:-1200}"
 HEALTH_WAIT_SECS="${HEALTH_WAIT_SECS:-600}"
-# A fix may touch at most this many source files — the platform refuses more
-# (src/services/e2eVerify/fix.ts MAX_SOURCE_FILES).
-export MAX_FIX_FILES="${MAX_FIX_FILES:-10}"
+# A fix may touch at most this many source files — small fixes break less. The
+# platform's own ceiling is 10 (src/services/e2eVerify/fix.ts MAX_SOURCE_FILES).
+export MAX_FIX_FILES="${MAX_FIX_FILES:-6}"
 
 log() { echo "[lumexa-verify] $*"; }
 
 # ---------------------------------------------------------------- platform API
-# api METHOD PATH [JSON]  → body in $WORK/resp.json, status in $HTTP_STATUS.
+# api METHOD PATH [JSON | @file]  → body in $WORK/resp.json, status in $HTTP_STATUS.
 # Retries (for ~10 min) transport errors, 5xx, and 404s that did not come from
 # the platform — our API always answers JSON, so a non-JSON 404 is a proxy or
 # tunnel in between (e.g. an offline ngrok endpoint). Every endpoint is safe to
@@ -47,7 +59,7 @@ api() {
     if [ -n "$data" ]; then
       HTTP_STATUS=$(curl -sS -o "$WORK/resp.json" -w '%{http_code}' -X "$method" \
         -H "Authorization: Bearer $RUN_TOKEN" -H 'Content-Type: application/json' \
-        --data "$data" --max-time 180 "$API_BASE$path" 2>/dev/null) || HTTP_STATUS=000
+        --data-binary "$data" --max-time 180 "$API_BASE$path" 2>/dev/null) || HTTP_STATUS=000
     else
       HTTP_STATUS=$(curl -sS -o "$WORK/resp.json" -w '%{http_code}' -X "$method" \
         -H "Authorization: Bearer $RUN_TOKEN" --max-time 180 "$API_BASE$path" 2>/dev/null) || HTTP_STATUS=000
@@ -75,6 +87,16 @@ scrub_secrets() {
   done
   rm -f "$WORK/resp.json" "$WORK/prompt.txt"
 }
+# The frozen suite goes to the platform so the run after the owner's
+# integrations are installed repeats the same tests (GitHub keeps the artifact
+# for a day only). Best-effort — never changes the run's outcome.
+save_suite() {
+  [ -d "$WORK/tests.frozen" ] || return 0
+  node "$HARNESS_SRC/lib/suite.mjs" pack "$WORK" "$WORK/suite-out.json" 2>/dev/null || return 0
+  api PUT /v1/e2e-verify/suite "@$WORK/suite-out.json"
+  [ "$HTTP_STATUS" = 200 ] || log "test suite not saved (platform answered $HTTP_STATUS)"
+  rm -f "$WORK/suite-out.json"
+}
 on_exit() { unlock_repo 2>/dev/null || chmod 755 "$REPO_DIR" 2>/dev/null; scrub_secrets; }
 trap on_exit EXIT
 
@@ -84,6 +106,7 @@ trap on_exit EXIT
 finish() {
   local status=$1 reason=$2 retry=${3:-false} summary='null'
   [ -f "$FINISHED_MARK" ] && exit 0
+  case "$status" in passed|fixed|partially_fixed|failed) save_suite ;; esac
   [ -f "$WORK/final-summary.json" ] && summary=$(cat "$WORK/final-summary.json")
   api POST /v1/e2e-verify/finish "$(jq -cn --arg s "$status" --arg r "$reason" --argjson sum "$summary" --argjson retry "$retry" \
     '{status: $s, reason: $r, summary: $sum, retry: $retry}')"
@@ -106,6 +129,7 @@ write_step_summary() {
       echo
       jq -r '"| Tests | Passed | Failed |\n|---|---|---|\n| \(.total) | \(.passed) | \(.failed) |"' "$WORK/final-summary.json" 2>/dev/null
       jq -r 'if (.failedIds|length) > 0 then "\n**Still failing**\n" + ([.failedIds[] | "- " + .] | join("\n")) else empty end' "$WORK/final-summary.json" 2>/dev/null
+      jq -r 'if ((.invalidIds // [])|length) > 0 then "\n**Marked as wrong tests (not counted) — worth a human look**\n" + ([.invalidIds[] | "- " + .] | join("\n")) else empty end' "$WORK/final-summary.json" 2>/dev/null
     fi
     [ -n "${ROUNDS_LOG:-}" ] && printf '\n**Fix rounds**\n%b\n' "$ROUNDS_LOG"
     echo
@@ -138,6 +162,32 @@ ADMIN_PASSWORD=$(jq -r .admin_password "$WORK/resp.json")
 BASE_SHA=$(jq -r .base_sha "$WORK/resp.json")
 MAX_ROUNDS=$(jq -r .max_rounds "$WORK/resp.json")
 jq -r .prd "$WORK/resp.json" > "$WORK/PRD.md"
+RUN_KIND=$(jq -r '.kind // "initial"' "$WORK/resp.json")
+# Integrations installed in the deployed app (kit manifests) — empty for an app
+# without any. Test writers get the names only; the fixer gets the kit details.
+jq -c '.integrations // []' "$WORK/resp.json" > "$WORK/integrations.json"
+INT_COUNT=$(jq 'length' "$WORK/integrations.json")
+rm -f "$WORK/integrations.md" "$WORK/integrations-kit.md"
+: > "$WORK/protected-extra.txt"
+if [ "$INT_COUNT" -gt 0 ]; then
+  jq -r '.[] | "- **\(.displayName)** — id `\(.provider)`, test file `integration-\(.provider).spec.ts`"' \
+    "$WORK/integrations.json" > "$WORK/integrations.md"
+  jq -r '.[] | "## \(.displayName) (`\(.provider)`)\n\nKit files — never edit, create or delete:\n"
+      + ([.files[] | "- `\(.)`"] | join("\n"))
+      + (if (.mounts | length) > 0 then "\n\nRouter mount:\n" + ([.mounts[] | "- in `\(.file)`: `\(.importLine)` and `\(.useLine)`"] | join("\n")) else "" end)
+      + (if (.pages | length) > 0 then "\n\nPages routed in `frontend/src/App.tsx`:\n" + ([.pages[] | "- `\(.routePath)` → `\(.componentName)`"] | join("\n")) else "" end)
+      + "\n\nWhat the kit provides:\n\n\(.contract)\n"' "$WORK/integrations.json" > "$WORK/integrations-kit.md"
+  jq -r '.[].files[]' "$WORK/integrations.json" > "$WORK/protected-extra.txt"
+fi
+export PROTECTED_EXTRA="$WORK/protected-extra.txt"
+# Prompts an admin edited on the platform replace this repo's copies.
+rm -rf "$WORK/prompts" && mkdir -p "$WORK/prompts"
+for name in $(jq -r '(.prompts // {}) | keys[] | select(test("^[a-z-]+\\.md$"))' "$WORK/resp.json"); do
+  jq -r --arg n "$name" '.prompts[$n]' "$WORK/resp.json" > "$WORK/prompts/$name"
+  log "using the platform's edited prompt: $name"
+done
+# prompt NAME → the platform's edited prompt when there is one, else the harness's.
+prompt() { if [ -s "$WORK/prompts/$1" ]; then echo "$WORK/prompts/$1"; else echo "$HARNESS_SRC/prompts/$1"; fi; }
 # Build-time frontend settings the platform bakes into the live bundle (not in
 # the repo — .env.local is excluded from the mirror). Missing = refuse to build.
 jq -e '.frontend_env | type == "object"' "$WORK/resp.json" >/dev/null 2>&1 \
@@ -171,7 +221,7 @@ rm -rf "$WORK/harness-src" && cp -r "$HARNESS_SRC" "$WORK/harness-src" && HARNES
 # Black-box testing: no read access to the app's source while tests are written
 # and reviewed — the PRD and the live app are the only sources of truth. Only
 # the fixer, after all testing, gets the code.
-lock_repo() { chmod 000 "$REPO_DIR"; }
+lock_repo() { chmod 000 "$REPO_DIR" 2>/dev/null || true; }
 unlock_repo() { chmod 755 "$REPO_DIR" 2>/dev/null || true; }
 
 # ---------------------------------------------------------------------- tools
@@ -195,7 +245,7 @@ claude_run() {
   shift 5
   local dirs=("$WORK" "$@")
   node -e 'const fs=require("fs");const t=fs.readFileSync(process.argv[1],"utf8");
-    fs.writeFileSync(process.argv[2],t.replace(/\$\{(WORK|APP_URL|REPO_DIR|RUN_TAG|MAX_FIX_FILES)\}/g,(_,k)=>process.env[k]||""));' \
+    fs.writeFileSync(process.argv[2],t.replace(/\$\{(WORK|APP_URL|REPO_DIR|RUN_TAG|MAX_FIX_FILES|ROUND)\}/g,(_,k)=>process.env[k]||""));' \
     "$prompt" "$WORK/prompt.txt"
   # Secrets Claude must never see: the platform run token and the push token.
   # stream-json → every step Claude takes is echoed live into the job log; the
@@ -243,13 +293,31 @@ wait_healthy() {
   return 1
 }
 
-# run_tests LABEL — writes $WORK/summary-LABEL.json and $WORK/failures.md.
+# summarize LABEL [FAILURES_MD] — (re)count a finished run against the current
+# invalid list; merges the run's confirm pass when there is one.
+summarize() {
+  node "$HARNESS_SRC/lib/summarize.mjs" "$WORK/results-$1.json" "$WORK/invalid-tests.txt" \
+    "$WORK/summary-$1.json" "${2:-$WORK/failures.md}"
+}
+# publish_summary LABEL — that run's counts become what the run reports.
+publish_summary() {
+  jq -c '{total, passed, failed, flaky, excludedAsInvalid, failedIds, invalidIds}' "$WORK/summary-$1.json" > "$WORK/final-summary.json"
+}
+
+# run_tests LABEL [FILTER] — writes $WORK/summary-LABEL.json and $WORK/failures.md.
+# Failing tests are run a second time on their own: only a failure that repeats
+# counts (a one-off must neither trigger a fix nor roll a good one back).
 run_tests() {
-  local label=$1
-  (cd "$WORK/harness" && RESULTS_FILE="$WORK/results-$label.json" timeout "$TESTS_TIMEOUT" npx playwright test >"$WORK/playwright-$label.log" 2>&1)
-  node "$HARNESS_SRC/lib/summarize.mjs" "$WORK/results-$label.json" "$WORK/invalid-tests.txt" \
-    "$WORK/summary-$label.json" "$WORK/failures.md"
-  jq -c '{total, passed, failed, flaky, excludedAsInvalid, failedIds}' "$WORK/summary-$label.json" > "$WORK/final-summary.json"
+  local label=$1 filter=${2:-}
+  rm -f "$WORK/results-$label.json" "$WORK/results-$label-confirm.json"
+  (cd "$WORK/harness" && RESULTS_FILE="$WORK/results-$label.json" timeout "$TESTS_TIMEOUT" npx playwright test $filter >"$WORK/playwright-$label.log" 2>&1)
+  summarize "$label"
+  if [ "$(jq -r .failed "$WORK/summary-$label.json")" -gt 0 ]; then
+    log "$(jq -r .failed "$WORK/summary-$label.json") failing — running them once more to confirm"
+    (cd "$WORK/harness" && RESULTS_FILE="$WORK/results-$label-confirm.json" timeout "$TESTS_TIMEOUT" npx playwright test --last-failed >"$WORK/playwright-$label-confirm.log" 2>&1)
+    summarize "$label"
+  fi
+  publish_summary "$label"
 }
 
 wait_healthy "$HEALTH_WAIT_SECS" || finish skipped "deployed app not healthy yet at $APP_URL" true
@@ -275,10 +343,27 @@ reuse_previous_tests() {
   return 1
 }
 
+# Integration runs repeat the suite the first run saved on the platform.
+restore_saved_suite() {
+  api GET /v1/e2e-verify/suite
+  [ "$HTTP_STATUS" = 200 ] || return 1
+  cp "$WORK/resp.json" "$WORK/suite-in.json"
+  node "$HARNESS_SRC/lib/suite.mjs" unpack "$WORK/suite-in.json" "$WORK" >/dev/null 2>&1
+  local rc=$?
+  rm -f "$WORK/suite-in.json"
+  [ $rc -eq 0 ] && log "repeating the saved test suite ($(ls "$WORK/harness/tests/"*.spec.ts | wc -l) spec files)"
+  return $rc
+}
+
 REUSED=""
-if [ "${REUSE_TESTS:-false}" = true ]; then
+if [ "$RUN_KIND" = integration ]; then
+  restore_saved_suite && REUSED=1 || log "no saved test suite for this app — writing one"
+fi
+if [ -z "$REUSED" ] && [ "${REUSE_TESTS:-false}" = true ]; then
   reuse_previous_tests && REUSED=1 || log "no previous test suite found — writing a new one"
 fi
+# Generated fresh below from this run's manifests — never a carried-over copy.
+rm -f "$WORK/harness/tests/integration-code.spec.ts"
 
 # ------------------------------------------------------------- write the tests
 if [ -z "$REUSED" ]; then
@@ -286,7 +371,7 @@ log "writing tests from the PRD ($TEST_MODEL)"
 # Black box: the test writer and reviewer get the PRD and the live app only —
 # no app source (it would bias tests toward what the code already does).
 lock_repo
-claude_run "$TEST_MODEL" "$CLAUDE_TESTS_TIMEOUT" "$WORK/harness" "$HARNESS_SRC/prompts/write-tests.md" "$WORK/claude-tests.log" \
+claude_run "$TEST_MODEL" "$CLAUDE_TESTS_TIMEOUT" "$WORK/harness" "$(prompt write-tests.md)" "$WORK/claude-tests.log" \
   || log "test-writing session ended non-zero — using the tests it wrote"
 if ! ls "$WORK/harness/tests/"*.spec.ts >/dev/null 2>&1; then
   finish error "no tests were written"
@@ -296,12 +381,44 @@ fi
 run_tests draft
 if [ "$(jq -r .failed "$WORK/summary-draft.json")" -gt 0 ]; then
   log "reviewing $(jq -r .failed "$WORK/summary-draft.json") failing test(s) — are they real bugs? ($TEST_MODEL)"
-  claude_run "$TEST_MODEL" "$CLAUDE_TESTS_TIMEOUT" "$WORK/harness" "$HARNESS_SRC/prompts/review-tests.md" "$WORK/claude-review.log" \
+  claude_run "$TEST_MODEL" "$CLAUDE_TESTS_TIMEOUT" "$WORK/harness" "$(prompt review-tests.md)" "$WORK/claude-review.log" \
     || log "review session ended non-zero — using the suite as it is"
 fi
 ls "$WORK/harness/tests/"*.spec.ts >/dev/null 2>&1 || finish error "no tests left after review"
 fi
+
+# ------------------------------------------------- installed integrations
+# Browser tests for each installed integration that has none yet (is it placed
+# where the PRD puts it, switched on, reaching the provider) — black box too.
+NEED_INT_TESTS=""
+for p in $(jq -r '.[].provider' "$WORK/integrations.json"); do
+  [ -f "$WORK/harness/tests/integration-$p.spec.ts" ] || NEED_INT_TESTS=1
+done
+if [ -n "$NEED_INT_TESTS" ]; then
+  log "writing tests for $INT_COUNT installed integration(s) ($TEST_MODEL)"
+  lock_repo
+  claude_run "$TEST_MODEL" "$CLAUDE_TESTS_TIMEOUT" "$WORK/harness" "$(prompt write-integration-tests.md)" "$WORK/claude-int-tests.log" \
+    || log "integration test-writing session ended non-zero — using the tests it wrote"
+  if ls "$WORK/harness/tests/"integration-*.spec.ts >/dev/null 2>&1; then
+    run_tests draft-int integration-
+    if [ "$(jq -r .failed "$WORK/summary-draft-int.json")" -gt 0 ]; then
+      log "reviewing $(jq -r .failed "$WORK/summary-draft-int.json") failing integration test(s) ($TEST_MODEL)"
+      claude_run "$TEST_MODEL" "$CLAUDE_TESTS_TIMEOUT" "$WORK/harness" "$(prompt review-tests.md)" "$WORK/claude-int-review.log" \
+        || log "review session ended non-zero — using the suite as it is"
+    fi
+  else
+    log "no integration tests were written — code checks only"
+  fi
+fi
+# Code-placement checks straight from the kit manifests (no model involved):
+# files present, router mounted, pages routed, the app's own code uses the kit.
+if [ "$INT_COUNT" -gt 0 ]; then
+  jq '[.[] | del(.contract)]' "$WORK/integrations.json" > "$WORK/integrations-code.json"
+  node "$HARNESS_SRC/lib/gen-code-spec.mjs" "$WORK/integrations-code.json" "$WORK/harness/tests/integration-code.spec.ts" \
+    || finish error "generating the integration code checks failed"
+fi
 # Freeze the suite: the fixer may read but never change it.
+rm -rf "$WORK/tests.frozen"
 cp -r "$WORK/harness/tests" "$WORK/tests.frozen"
 unlock_repo
 # The app repo was read-only for the test writer — discard anything it touched
@@ -313,7 +430,7 @@ run_tests r0
 [ "$(jq -r .total "$WORK/summary-r0.json")" -gt 0 ] || finish error "no tests ran"
 INITIAL_FAILED=$(jq -r .failed "$WORK/summary-r0.json")
 if [ "$INITIAL_FAILED" -eq 0 ]; then
-  finish passed "all $(jq -r .total "$WORK/summary-r0.json") PRD tests passed"
+  finish passed "all $(jq -r .total "$WORK/summary-r0.json") tests passed ($RUN_KIND run, $INT_COUNT integration(s) checked)"
 fi
 log "$INITIAL_FAILED failing test(s) — starting fix rounds"
 
@@ -351,20 +468,33 @@ reset_lockfiles
 CUR_SHA="$BASE_SHA"
 PREV_LABEL=r0
 for ROUND in $(seq 1 "$MAX_ROUNDS"); do
+  export ROUND
   log "round $ROUND: fixing ($FIX_MODEL)"
-  claude_run "$FIX_MODEL" "$CLAUDE_FIX_TIMEOUT" "$REPO_DIR" "$HARNESS_SRC/prompts/fix.md" "$WORK/claude-fix-$ROUND.log" "$REPO_DIR" \
+  INVALID_BEFORE=$(wc -l < "$WORK/invalid-tests.txt")
+  claude_run "$FIX_MODEL" "$CLAUDE_FIX_TIMEOUT" "$REPO_DIR" "$(prompt fix.md)" "$WORK/claude-fix-$ROUND.log" "$REPO_DIR" \
     || log "fix session ended non-zero — checking what it changed"
   restore_tests
   reset_lockfiles
   GUARD=$(cd "$REPO_DIR" && node "$HARNESS_SRC/lib/guard-diff.mjs") || finish error "diff guard failed"
   log "guard: $GUARD"
 
+  # Second opinion before anything ships: a fresh session reverts every change
+  # no failing test needs, and re-checks the tests the fixer declared wrong.
+  if [ "$(echo "$GUARD" | jq -r .sourceChanged)" -gt 0 ] || [ "$(wc -l < "$WORK/invalid-tests.txt")" -ne "$INVALID_BEFORE" ]; then
+    log "round $ROUND: reviewing the fix ($REVIEW_MODEL)"
+    claude_run "$REVIEW_MODEL" "$CLAUDE_REVIEW_TIMEOUT" "$REPO_DIR" "$(prompt review-fix.md)" "$WORK/claude-review-fix-$ROUND.log" "$REPO_DIR" \
+      || log "fix review ended non-zero — checking what is left"
+    restore_tests
+    reset_lockfiles
+    GUARD=$(cd "$REPO_DIR" && node "$HARNESS_SRC/lib/guard-diff.mjs") || finish error "diff guard failed"
+    log "guard after review: $GUARD"
+  fi
+
   # No source change: the fixer either gave up or only marked tests invalid —
   # recount the last run without the invalid ones and stop.
   if [ "$(echo "$GUARD" | jq -r .sourceChanged)" -eq 0 ]; then
-    node "$HARNESS_SRC/lib/summarize.mjs" "$WORK/results-$PREV_LABEL.json" "$WORK/invalid-tests.txt" \
-      "$WORK/summary-$PREV_LABEL.json" "$WORK/failures.md"
-    jq -c '{total, passed, failed, flaky, excludedAsInvalid, failedIds}' "$WORK/summary-$PREV_LABEL.json" > "$WORK/final-summary.json"
+    summarize "$PREV_LABEL"
+    publish_summary "$PREV_LABEL"
     if [ "$(jq -r .failed "$WORK/summary-$PREV_LABEL.json")" -eq 0 ]; then
       [ "$ROUND" -eq 1 ] && finish passed "remaining failures were test mistakes, not app bugs"
       finish fixed "all PRD tests pass"
@@ -383,7 +513,7 @@ for ROUND in $(seq 1 "$MAX_ROUNDS"); do
 
   if ! build_app; then
     log "build failed — one repair attempt"
-    claude_run "$FIX_MODEL" 15m "$REPO_DIR" "$HARNESS_SRC/prompts/fix-build.md" "$WORK/claude-build-$ROUND.log" "$REPO_DIR" || true
+    claude_run "$FIX_MODEL" 15m "$REPO_DIR" "$(prompt fix-build.md)" "$WORK/claude-build-$ROUND.log" "$REPO_DIR" || true
     restore_tests
     reset_lockfiles
     (cd "$REPO_DIR" && node "$HARNESS_SRC/lib/guard-diff.mjs") >/dev/null || true
@@ -448,6 +578,9 @@ for ROUND in $(seq 1 "$MAX_ROUNDS"); do
     finish failed "app unhealthy after round $ROUND (rolled back)"
   fi
 
+  # Tests marked invalid this round leave the "before" count too, so the
+  # comparison below measures the code change alone.
+  summarize "$PREV_LABEL" "$WORK/failures-before.md"
   run_tests "r$ROUND"
   NOW_FAILED=$(jq -r .failed "$WORK/summary-r$ROUND.json")
   PREV_FAILED=$(jq -r .failed "$WORK/summary-$PREV_LABEL.json")
@@ -457,9 +590,18 @@ for ROUND in $(seq 1 "$MAX_ROUNDS"); do
     log "round $ROUND made things worse ($NEWLY_BROKEN newly broken) — rolling back"
     ROUNDS_LOG="${ROUNDS_LOG}- round $ROUND: ${FIX_SHA:0:7} broke $NEWLY_BROKEN passing test(s) — rolled back\n"
     api POST /v1/e2e-verify/rollback "$(jq -cn --argjson r "$ROUND" '{round: $r, reason: "regression"}')"
-    cp "$WORK/summary-$PREV_LABEL.json" "$WORK/tmp.json" && jq -c '{total, passed, failed, flaky, excludedAsInvalid, failedIds}' "$WORK/tmp.json" > "$WORK/final-summary.json"
+    publish_summary "$PREV_LABEL"
     [ "$ROUND" -eq 1 ] && finish failed "the fix broke passing tests (rolled back)"
     finish partially_fixed "round $ROUND broke passing tests (rolled back to round $((ROUND - 1)))"
+  fi
+  # A change that repaired nothing is risk without benefit — it does not stay.
+  if [ "$NOW_FAILED" -ge "$PREV_FAILED" ]; then
+    log "round $ROUND repaired no failing test — rolling back"
+    ROUNDS_LOG="${ROUNDS_LOG}- round $ROUND: ${FIX_SHA:0:7} repaired nothing ($PREV_FAILED still failing) — rolled back\n"
+    api POST /v1/e2e-verify/rollback "$(jq -cn --argjson r "$ROUND" '{round: $r, reason: "no improvement"}')"
+    publish_summary "$PREV_LABEL"
+    [ "$ROUND" -eq 1 ] && finish failed "the fix repaired no failing test (rolled back)"
+    finish partially_fixed "round $ROUND repaired nothing (rolled back to round $((ROUND - 1)))"
   fi
   ROUNDS_LOG="${ROUNDS_LOG}- round $ROUND: ${FIX_SHA:0:7} deployed — $PREV_FAILED → $NOW_FAILED failing\n"
   if [ "$NOW_FAILED" -eq 0 ]; then

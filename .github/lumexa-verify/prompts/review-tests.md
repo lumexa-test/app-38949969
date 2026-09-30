@@ -16,6 +16,18 @@ For every failing test, reproduce it in the browser and decide:
   says is a wrong test — point it at the real one that does that job.
 - The feature genuinely does not work as the PRD requires → leave it failing.
 
+A failure that only proves WHERE the app sent the user (which URL or page after
+login, sign-out or a refused request), a CSS class, or a network call is a wrong
+test even when the PRD describes that route — rewrite it to check the effect
+(signed out = the signed-in area is unreachable and sign-in is offered) and
+keep it only if the effect itself is broken.
+
+Exception — files named `integration-*.spec.ts` test the app's INSTALLED
+integrations on purpose (`${WORK}/integrations.md` lists them and the rules for
+testing them). For those, "it checks an integration" is not a reason to change
+or delete the test; they are wrong only if they break those rules, use a bad
+selector, or expect the integration somewhere the PRD does not put it.
+
 Do not weaken a test that catches a real functional bug. Do not change the app.
 
 When done, run the whole suite in the FOREGROUND and wait for it to finish:

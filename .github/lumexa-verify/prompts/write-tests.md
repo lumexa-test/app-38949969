@@ -18,6 +18,31 @@ navigation, the page itself), exactly as a real user or QA tester would.
 Never decide what the right result is from how the app currently behaves —
 if the app and the PRD disagree, the PRD wins and the test must fail.
 
+## How the PRD is laid out — what to test from
+
+The PRD has a client part and a hidden build specification. Section numbers and
+exact heading wording can differ between PRDs; go by the heading's meaning.
+
+- **User Roles**, **User Journeys** and **Features & Requirements** are the
+  requirements. Every role, every journey and every feature paragraph there
+  gets tested — including the unhappy paths a feature paragraph states (not
+  allowed, duplicate, someone else's item).
+- **Integrations** lists the external services. They are NOT tested here (see
+  below) — a feature that depends on one is tested up to the point where the
+  provider would act.
+- **Out of Scope** and **Non-Goals — do not build** are never tested, and a
+  missing feature listed there is never a failure.
+- The build specification (**Visual Design & Branding**, **Page & UX
+  Specification**, **Interaction Feedback Rules**, **Business Rules & Pinned
+  Defaults**, **Technical Constraints**) is REFERENCE ONLY: use it to understand
+  which pages exist and what a feature's rules are. Never write a test for its
+  design, layout, wording or feedback details.
+- **Traceability** is a cross-check: every entry in it points at a feature that
+  must have a test.
+
+An older PRD may only have Overview / Users & Roles / Features — same idea:
+roles and features are the requirements.
+
 ## What "functional" means here — the only thing you test
 
 A test passes when the FEATURE WORKS, not when the page looks or reads a certain way.
@@ -91,8 +116,8 @@ The same applies to feature, button and field names ("Projects" ↔
 
 Playwright tests in TypeScript under `${WORK}/harness/tests/`, one spec file
 per area. Import from `@playwright/test`; `baseURL` is set, use relative paths.
-Title each test with the requirement it proves:
-`[PRD 3.2 Bookings] a user books a slot and it appears in their bookings`.
+Title each test with the PRD feature (or journey) it proves, by its name in the
+PRD: `[Appointment Cancellation] a customer cancels and the slot is free again`.
 
 Selectors must survive copy changes: prefer `getByRole` with a case-insensitive
 regex covering synonyms (`/sign in|log in|login/i`), form field labels or
@@ -103,6 +128,26 @@ Data safety — this is the app's LIVE database:
   tests only edit or delete records carrying that tag.
 - Never change the admin account and never touch data you did not create.
 - Never complete a real payment or send a real external message.
+
+A test must keep passing when the app is restyled, its pages are moved to other
+URLs, or its API is reshaped — as long as the feature still works. So never:
+- assert the app's own URL or path (`toHaveURL(/\/dashboard/)`,
+  `waitForURL(/\/orders\/\d+/)`). To prove the user arrived, assert something
+  only that page shows (its main list, form or heading role). The one exception
+  is a redirect to an EXTERNAL site, and "the URL changed" when you need to
+  reuse it (`const url = page.url()`).
+- wait on or assert network calls (`waitForResponse`, `waitForRequest`, route
+  interception). Wait for what the user sees change instead.
+- assert CSS classes, colours, inline styles or DOM structure. For "which option
+  is selected" use the accessible state (`toBeChecked`, `aria-pressed`,
+  `aria-selected`, `toHaveValue`); if the app exposes none, prove the default by
+  its EFFECT (continue, and the summary shows that option) or drop the check.
+- `goto()` a guessed path to reach a page a user would click to. `goto` is for
+  the start page, a URL you captured earlier in the same test, or deliberately
+  visiting a page the role must NOT reach.
+- test where a redirect lands (after login, logout, a refused page). Test the
+  effect: after sign-out the signed-in area is no longer reachable and a way to
+  sign in is offered; after a refused page the protected content is not shown.
 
 Tests must be independent (each logs in itself), wait on visible state (never
 fixed sleeps), and finish well under 60s each.
