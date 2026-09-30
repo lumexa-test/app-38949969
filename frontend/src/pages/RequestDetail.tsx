@@ -141,7 +141,7 @@ export const RequestDetail = (): FunctionComponent => {
               </div>
             )}
 
-            {job.status === 'ready' && job.resultImagePath && (
+            {isOwner && job.status === 'ready' && job.resultImagePath && (
               <a
                 href={job.resultImagePath}
                 download
