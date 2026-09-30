@@ -122,3 +122,20 @@ model CreditTransaction {
   @@index([userId])
   @@map("credit_transactions")
 }
+
+model PaymentSession {
+  id              String   @id @default(uuid())
+  stripeSessionId String   @unique @map("stripe_session_id")
+  status          String   @default("pending")
+  amountTotal     Int      @default(0) @map("amount_total")
+  currency        String   @default("usd")
+  customerEmail   String?  @map("customer_email")
+  // Loose link to whatever this payment was for, e.g. ("Order", "42").
+  referenceType   String?  @map("reference_type")
+  referenceId     String?  @map("reference_id")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  @@index([referenceType, referenceId])
+  @@map("payment_sessions")
+}

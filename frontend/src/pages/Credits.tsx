@@ -1,10 +1,12 @@
 import { useEffect, useState } from 'react';
-import { Link } from 'react-router-dom';
-import { Button } from '@/components/ui/button';
+import { Link, useSearchParams } from 'react-router-dom';
 import { PageContainer } from '@/components/AppLayout';
 import { PageHeader } from '@/components/common/PageHeader';
 import { LoadingRows, ErrorState, EmptyState } from '@/components/common/states';
-import { CREDIT_PACKS, getCreditsSummary, checkoutPack, type CreditTransaction } from '@/lib/credits';
+import { CheckoutButton } from '@/components/integrations/CheckoutButton';
+import { PaymentStatusBanner } from '@/components/integrations/PaymentStatusBanner';
+import { CREDIT_PACKS, getCreditsSummary, type CreditTransaction } from '@/lib/credits';
+import { useAuthStore } from '@/store/authStore';
 import { ApiError } from '@/lib/apiClient';
 import type { FunctionComponent } from '@/common/types';
 
@@ -23,8 +25,10 @@ export const Credits = (): FunctionComponent => {
   const [balance, setBalance] = useState<number | null>(null);
   const [history, setHistory] = useState<CreditTransaction[] | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [pendingPack, setPendingPack] = useState<string | null>(null);
   const [checkoutNotice, setCheckoutNotice] = useState<string | null>(null);
+  const [searchParams] = useSearchParams();
+  const sessionId = searchParams.get('session_id');
+  const user = useAuthStore((s) => s.user);
 
   const load = (): void => {
     setBalance(null);
@@ -40,22 +44,14 @@ export const Credits = (): FunctionComponent => {
 
   useEffect(load, []);
 
-  const handleBuy = async (packId: string): Promise<void> => {
-    setPendingPack(packId);
-    setCheckoutNotice(null);
-    try {
-      await checkoutPack(packId);
-    } catch (err) {
-      setCheckoutNotice(err instanceof ApiError ? err.message : 'Checkout is unavailable right now.');
-    } finally {
-      setPendingPack(null);
-    }
-  };
-
   return (
     <PageContainer>
       <div className="space-y-6">
         <PageHeader title="Credits & billing" description="Manage your credit balance and buy more when you need them." />
+
+        {sessionId && (
+          <PaymentStatusBanner sessionId={sessionId} onPaid={load} />
+        )}
 
         {error && <ErrorState message={error} onRetry={load} />}
 
@@ -75,13 +71,15 @@ export const Credits = (): FunctionComponent => {
                   <div key={pack.id} className="flex flex-col items-start gap-3 rounded-lg border bg-card p-5 shadow-card">
                     <p className="text-2xl font-bold text-foreground">{pack.credits} credits</p>
                     <p className="text-sm text-muted-foreground">${pack.priceUsd.toFixed(2)} one-time</p>
-                    <Button
-                      onClick={() => handleBuy(pack.id)}
-                      disabled={pendingPack === pack.id}
+                    <CheckoutButton
+                      items={[{ name: `${pack.credits} credits`, amountCents: pack.priceUsd * 100 }]}
+                      referenceType="CreditPack"
+                      referenceId={`${pack.id}:${user?.id ?? ''}`}
+                      customerEmail={user?.email}
+                      label="Buy"
                       className="min-h-[44px] w-full"
-                    >
-                      {pendingPack === pack.id ? 'Redirecting…' : 'Buy'}
-                    </Button>
+                      onError={(msg) => setCheckoutNotice(msg)}
+                    />
                   </div>
                 ))}
               </div>

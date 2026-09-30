@@ -1,6 +1,7 @@
 import { Request, Response } from 'express';
 import { handlePrismaError } from '../lib/handleError';
 import { handleSeamError, IntegrationNotConfiguredError } from '../lib/integrationSeam';
+import { isStripeConfigured, createCheckoutSession, StripeError } from '../custom/integrations/stripe';
 import CreditTransaction from '../models/creditTransaction';
 import User from '../models/user';
 
@@ -11,7 +12,7 @@ export const CREDIT_PACKS = [
   { id: 'pack_100', credits: 100, priceUsd: 35 },
 ] as const;
 
-function requireUser(req: Request, res: Response): { id: number; tenantId: string } | null {
+function requireUser(req: Request, res: Response): { id: number; email: string; tenantId: string } | null {
   if (!req.user) {
     res.status(401).json({ message: 'Unauthorized' });
     return null;
@@ -40,11 +41,6 @@ async function getSummary(req: Request, res: Response): Promise<any> {
   }
 }
 
-// @integration-seam stripe credit-pack-checkout
-async function chargeForCreditPack(_packId: string): Promise<{ checkoutUrl: string }> {
-  throw new IntegrationNotConfiguredError('Stripe');
-}
-
 // POST /api/credits/checkout — { packId }
 async function checkout(req: Request, res: Response): Promise<any> {
   const user = requireUser(req, res);
@@ -53,10 +49,26 @@ async function checkout(req: Request, res: Response): Promise<any> {
   const pack = CREDIT_PACKS.find((p) => p.id === req.body.packId);
   if (!pack) return res.status(400).json({ message: 'Unknown credit pack.' });
 
+  if (!isStripeConfigured()) {
+    if (handleSeamError(new IntegrationNotConfiguredError('Stripe'), res)) return;
+  }
+
+  const frontendBase = (process.env.FRONTEND_URL || 'http://localhost:5173').replace(/\/+$/, '');
+
   try {
-    const session = await chargeForCreditPack(pack.id);
-    return res.status(200).json(session);
+    const session = await createCheckoutSession({
+      items: [{ name: `${pack.credits} credits`, amountCents: pack.priceUsd * 100 }],
+      successUrl: `${frontendBase}/credits`,
+      cancelUrl: `${frontendBase}/credits`,
+      referenceType: 'CreditPack',
+      referenceId: `${pack.id}:${user.id}`,
+      customerEmail: user.email,
+    });
+    return res.status(200).json({ checkoutUrl: session.url });
   } catch (error) {
+    if (error instanceof StripeError) {
+      return res.status(error.status).json({ message: error.message });
+    }
     if (handleSeamError(error, res)) return;
     return handlePrismaError(error, res);
   }
