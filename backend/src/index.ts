@@ -11,8 +11,6 @@ import uploadRoutes from './custom/uploads';
 import config from '../config';
 import { prisma } from './lib/prisma';
 import paymentsRouter, { stripeWebhookRouter } from './custom/integrations/stripe';
-import aiRouter, { transcribeRouter } from './custom/integrations/openai';
-import { analyzeImageRouter } from './custom/integrations/openai';
 import perplexityRouter from './custom/integrations/perplexity';
 
 const app = express();
@@ -38,8 +36,6 @@ if (basePath && basePath !== '/') {
 
 app.use(cors());
 app.use('/api/payments/webhook', stripeWebhookRouter);
-app.use('/api/ai/transcribe', transcribeRouter);
-app.use('/api/ai/analyze-image', analyzeImageRouter);
 app.use(express.json());
 
 app.get('/health', (_req: Request, res: Response) => {
@@ -59,7 +55,6 @@ app.use('/api/credits', creditsRoutes);
 // Example: app.use('/api/search', searchRoutes);
 app.use('/api/uploads', uploadRoutes); // image uploads → platform proxy (see "Image uploads" in backend/CLAUDE.md; never touch S3/AWS directly)
 app.use('/api/payments', paymentsRouter);
-app.use('/api/ai', aiRouter);
 app.use('/api/perplexity', perplexityRouter);
 
 // Serve frontend static files (production: vite build output copied to public/)

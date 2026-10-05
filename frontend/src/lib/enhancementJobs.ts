@@ -54,10 +54,6 @@ export function listMine(page = 1): Promise<PagedResult<EnhancementJob>> {
   return apiClient.get<PagedResult<EnhancementJob>>(`/api/enhancement-jobs?page=${page}`);
 }
 
-export function runReview(id: string | number): Promise<EnhancementJob> {
-  return apiClient.post<EnhancementJob>(`/api/enhancement-jobs/${id}/review`, {});
-}
-
 export function saveOptions(
   id: string | number,
   body: { selectedOptions: string[]; optionStrengths: Record<string, string> },

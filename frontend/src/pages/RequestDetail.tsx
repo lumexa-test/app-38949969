@@ -168,19 +168,6 @@ export const RequestDetail = (): FunctionComponent => {
             </div>
 
             <div className="rounded-lg border bg-card p-4 shadow-card">
-              <p className="mb-2 text-sm font-semibold text-foreground">Automatic review</p>
-              {job.reviewStatus === 'complete' && job.reviewNotes ? (
-                <ul className="list-disc space-y-1 pl-4 text-sm text-muted-foreground">
-                  {job.reviewNotes.map((note) => (
-                    <li key={note}>{note}</li>
-                  ))}
-                </ul>
-              ) : (
-                <p className="text-sm text-muted-foreground">Suggestions were unavailable for this request.</p>
-              )}
-            </div>
-
-            <div className="rounded-lg border bg-card p-4 shadow-card">
               <p className="mb-3 text-sm font-semibold text-foreground">Timeline</p>
               <ul className="space-y-3 text-sm">
                 <TimelineRow icon={<CheckCircle2 className="size-4 text-[--mint-deep]" />} label="Submitted" value={formatDate(job.submittedAt)} />

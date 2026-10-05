@@ -42,10 +42,6 @@ async function findInTenant(id: number, tenantId: string) {
   });
 }
 
-async function updateReview(id: number, data: { reviewStatus: string; reviewNotes?: Prisma.InputJsonValue }) {
-  return prisma.enhancementJob.update({ where: { id }, data });
-}
-
 async function updateOptions(
   id: number,
   data: { selectedOptions: Prisma.InputJsonValue; optionStrengths: Prisma.InputJsonValue },
@@ -109,7 +105,6 @@ export default {
   generateReference,
   createDraft,
   findInTenant,
-  updateReview,
   updateOptions,
   listMine,
   countMine,
