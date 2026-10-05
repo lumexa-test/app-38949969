@@ -1,6 +1,6 @@
 import { useState, type ReactNode } from 'react';
 import { Link, NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom';
-import { Bell, ClipboardList, CreditCard, LayoutDashboard, ListChecks, Search, Sparkles, Menu, X } from 'lucide-react';
+import { Bell, ClipboardList, CreditCard, LayoutDashboard, ListChecks, Sparkles, Menu, X } from 'lucide-react';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -28,7 +28,6 @@ const MEMBER_NAV_ITEMS = [
   { to: '/dashboard', label: 'Dashboard', icon: LayoutDashboard, editId: '4', iconEditId: '5', labelEditId: '6' },
   { to: '/enhance/new', label: 'New enhancement', icon: Sparkles, editId: '7', iconEditId: '8', labelEditId: '9' },
   { to: '/credits', label: 'Credits & billing', icon: CreditCard, editId: '14', iconEditId: '15', labelEditId: '16' },
-  { to: '/search', label: 'Search', icon: Search, editId: '17', iconEditId: '18', labelEditId: '19' },
 ] as const;
 
 const ADMIN_NAV_ITEMS = [
@@ -173,7 +172,6 @@ const PAGE_TITLES: Array<[string, string]> = [
   ['/enhance/', 'New enhancement'],
   ['/requests/', 'Enhancement request'],
   ['/credits', 'Credits & billing'],
-  ['/search', 'Search'],
   ['/admin/requests', 'Request monitor'],
   ['/admin/jobs', 'Job tracker'],
 ];

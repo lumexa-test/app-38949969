@@ -15,7 +15,6 @@ import { ChooseCorrections } from '@/pages/ChooseCorrections';
 import { ConfirmEnhancement } from '@/pages/ConfirmEnhancement';
 import { RequestDetail } from '@/pages/RequestDetail';
 import { Credits } from '@/pages/Credits';
-import { Search } from '@/pages/Search';
 import { AdminRequests } from '@/pages/AdminRequests';
 import { AdminJobs } from '@/pages/AdminJobs';
 import { NotFound } from '@/pages/NotFound';
@@ -52,7 +51,6 @@ const App = (): FunctionComponent => {
 							<Route path="/enhance/:id/options" element={<ChooseCorrections />} />
 							<Route path="/enhance/:id/confirm" element={<ConfirmEnhancement />} />
 							<Route path="/credits" element={<Credits />} />
-							<Route path="/search" element={<Search />} />
 						</Route>
 
 						{/* Admin-only monitoring screens */}
